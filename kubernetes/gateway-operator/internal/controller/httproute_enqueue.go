@@ -213,13 +213,17 @@ func (r *HTTPRouteReconciler) enqueueHTTPRoutesForConfigMap(ctx context.Context,
 }
 
 // enqueueHTTPRoutesForValueFrom is the shared fan-out for Secret / ConfigMap changes.
-// It lists APIPolicy objects cluster-wide, walks each `params` JSON tree looking for a
-// valueFrom reference of the given kind pointing at (targetNS, targetName), and returns
+// It looks up APIPolicy objects through the valueFrom field index, confirms each one still
+// references (targetNS, targetName) with the given kind, and returns
 // reconcile requests for the HTTPRoutes those APIPolicy objects apply to (either via
 // spec.targetRef or via rule ExtensionRef).
 func (r *HTTPRouteReconciler) enqueueHTTPRoutesForValueFrom(ctx context.Context, kind, targetNS, targetName, sourceKey string) []reconcile.Request {
+	field := IndexAPIPolicyValueFromSecret
+	if kind == configMapKeyRefKey {
+		field = IndexAPIPolicyValueFromConfigMap
+	}
 	list := &apiv1.APIPolicyList{}
-	if err := r.List(ctx, list); err != nil {
+	if err := r.List(ctx, list, client.MatchingFields{field: namespacedKey(targetNS, targetName)}); err != nil {
 		if r.Logger != nil {
 			r.Logger.Error("watch: list APIPolicies for valueFrom enqueue",
 				slog.Any("error", err),
@@ -328,7 +332,9 @@ func (r *HTTPRouteReconciler) enqueueHTTPRoutesForService(ctx context.Context, o
 		return nil
 	}
 	routes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, routes); err != nil {
+	if err := r.List(ctx, routes, client.MatchingFields{
+		IndexHTTPRouteBackendService: namespacedKey(svc.Namespace, svc.Name),
+	}); err != nil {
 		if r.Logger != nil {
 			r.Logger.Error("watch: list HTTPRoutes for Service enqueue",
 				slog.Any("error", err),
@@ -372,18 +378,39 @@ func (r *HTTPRouteReconciler) enqueueHTTPRoutesForReferenceGrant(ctx context.Con
 	if !ok {
 		return nil
 	}
-	routes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, routes); err != nil {
-		if r.Logger != nil {
-			r.Logger.Error("watch: list HTTPRoutes for ReferenceGrant enqueue", slog.Any("error", err))
-		}
-		return nil
-	}
+	// A grant can only affect routes in the namespaces it allows HTTPRoutes from, so list
+	// those namespaces rather than every route in the cluster.
+	seenNS := make(map[string]struct{})
+	seen := make(map[types.NamespacedName]struct{})
 	var requests []reconcile.Request
-	for i := range routes.Items {
-		rt := &routes.Items[i]
-		if httpRouteAffectedByReferenceGrant(rt, grant) {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rt)})
+	for _, f := range grant.Spec.From {
+		if string(f.Kind) != "HTTPRoute" || string(f.Group) != gatewayv1.GroupName {
+			continue
+		}
+		ns := string(f.Namespace)
+		if _, dup := seenNS[ns]; dup {
+			continue
+		}
+		seenNS[ns] = struct{}{}
+		routes := &gatewayv1.HTTPRouteList{}
+		if err := r.List(ctx, routes, client.InNamespace(ns)); err != nil {
+			if r.Logger != nil {
+				r.Logger.Error("watch: list HTTPRoutes for ReferenceGrant enqueue",
+					slog.Any("error", err), slog.String("namespace", ns))
+			}
+			continue
+		}
+		for i := range routes.Items {
+			rt := &routes.Items[i]
+			if !httpRouteAffectedByReferenceGrant(rt, grant) {
+				continue
+			}
+			key := client.ObjectKeyFromObject(rt)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			requests = append(requests, reconcile.Request{NamespacedName: key})
 		}
 	}
 	return requests
@@ -440,7 +467,7 @@ func (r *HTTPRouteReconciler) enqueueHTTPRoutesForGateway(ctx context.Context, o
 		return nil
 	}
 	routes := &gatewayv1.HTTPRouteList{}
-	if err := r.List(ctx, routes); err != nil {
+	if err := r.List(ctx, routes, client.MatchingFields{IndexHTTPRouteParentGateway: gatewayIndexKey(gw)}); err != nil {
 		if r.Logger != nil {
 			r.Logger.Error("watch: list HTTPRoutes for Gateway enqueue", slog.Any("error", err))
 		}

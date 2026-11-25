@@ -85,6 +85,7 @@ func InstallOrUpgrade(ctx context.Context, in DeployInput) error {
 		Password:        in.DockerPassword,
 		Insecure:        in.Config.Gateway.InsecureRegistry,
 		PlainHTTP:       in.Config.Gateway.PlainHTTP,
+		MaxHistory:      in.Config.Gateway.HelmMaxHistory,
 	}); err != nil {
 		return err
 	}

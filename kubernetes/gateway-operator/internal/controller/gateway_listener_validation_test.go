@@ -33,7 +33,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -234,7 +233,7 @@ func TestEvaluateListeners(t *testing.T) {
 			scheme := runtime.NewScheme()
 			_ = corev1.AddToScheme(scheme)
 			_ = gatewayv1.Install(scheme)
-			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			clientBuilder := newIndexedFakeClientBuilder(scheme)
 			for i := range tt.secrets {
 				clientBuilder = clientBuilder.WithObjects(&tt.secrets[i])
 			}
@@ -765,7 +764,7 @@ func TestValidateTLSCertificateRefs(t *testing.T) {
 			scheme := runtime.NewScheme()
 			_ = corev1.AddToScheme(scheme)
 			_ = gatewayv1beta1.AddToScheme(scheme)
-			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			clientBuilder := newIndexedFakeClientBuilder(scheme)
 			for i := range tt.secrets {
 				clientBuilder = clientBuilder.WithObjects(&tt.secrets[i])
 			}
@@ -850,7 +849,7 @@ func TestValidateParametersRef(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
 			_ = corev1.AddToScheme(scheme)
-			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			cl := newIndexedFakeClientBuilder(scheme).Build()
 
 			valid, reason, err := validateParametersRef(context.Background(), cl, tt.gateway)
 			if err != nil {
@@ -890,7 +889,7 @@ func TestEvaluateListeners_ProgrammedFalseOnInvalidTLS(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cl := newIndexedFakeClientBuilder(scheme).Build()
 
 	statuses, hasAccepted, err := evaluateListeners(context.Background(), cl, gw)
 	if err != nil {
@@ -950,7 +949,7 @@ func TestEvaluateListeners_RefNotPermittedOnCrossNamespaceSecret(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
 	_ = gatewayv1beta1.AddToScheme(scheme)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+	cl := newIndexedFakeClientBuilder(scheme).WithObjects(
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "certificate", Namespace: "backend"},
 			Type:       corev1.SecretTypeTLS,
@@ -1018,7 +1017,7 @@ func TestValidateTLSCertificateRefs_TransientErrors(t *testing.T) {
 	_ = gatewayv1beta1.Install(scheme)
 
 	t.Run("ReferenceGrant list failure is transient", func(t *testing.T) {
-		base := fake.NewClientBuilder().WithScheme(scheme).Build()
+		base := newIndexedFakeClientBuilder(scheme).Build()
 		cl := interceptor.NewClient(base, interceptor.Funcs{
 			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if _, ok := list.(*gatewayv1beta1.ReferenceGrantList); ok {
@@ -1048,7 +1047,7 @@ func TestValidateTLSCertificateRefs_TransientErrors(t *testing.T) {
 				To: []gatewayv1beta1.ReferenceGrantTo{{Kind: "Secret"}},
 			},
 		}
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(grant).Build()
+		base := newIndexedFakeClientBuilder(scheme).WithObjects(grant).Build()
 		cl := interceptor.NewClient(base, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, ok := obj.(*corev1.Secret); ok {
@@ -1066,7 +1065,7 @@ func TestValidateTLSCertificateRefs_TransientErrors(t *testing.T) {
 
 	t.Run("missing ReferenceGrant remains a permanent deny (no error)", func(t *testing.T) {
 		// No grant, no interceptor: the lookup completes and finds nothing -> permanent deny.
-		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		cl := newIndexedFakeClientBuilder(scheme).Build()
 		valid, reason, _, err := validateTLSCertificateRefs(context.Background(), cl, gwNS, listener)
 		if err != nil {
 			t.Fatalf("genuine deny must not produce an error, got %v", err)

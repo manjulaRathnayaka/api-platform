@@ -91,6 +91,9 @@ gateway:
     insecureRegistry: false
     # Use plain HTTP instead of HTTPS for OCI registries (for local/test registries)
     plainHTTP: false
+    # Helm revisions kept per gateway release → gateway.helm_max_history. Each revision is
+    # a Secret holding the rendered manifest. 0 keeps every revision.
+    maxHistory: 3
     # Credentials for pulling the gateway Helm chart from a private OCI registry.
     # Rendered into operator config as gateway.registry_credentials_secret ONLY when
     # name is set; leave name empty for anonymous pulls.
@@ -731,6 +734,15 @@ reconciliation:
   initialBackoff: 1s
   # Maximum exponential backoff (Go duration) → reconciliation.max_backoff_duration.
   maxBackoffDuration: 60s
+  # How long each controller waits at startup for its caches and watch handlers to sync
+  # (Go duration) → reconciliation.cache_sync_timeout.
+  cacheSyncTimeout: 5m
+# Controllers to keep off → controllers.disabled. Names: APIGateway, RestApi, K8sGateway,
+# K8sGatewayClass, HTTPRoute, LlmProviderTemplate, LlmProvider, LlmProxy, Mcp, Agent,
+# ManagedSecret, Certificate, ApiKey, SubscriptionPlan, Subscription.
+# A controller whose CRDs are not installed is skipped automatically.
+controllers:
+  disabled: []
 logging:
   level: "info"
   format: "json"

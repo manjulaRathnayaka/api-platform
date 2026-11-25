@@ -57,7 +57,7 @@ func computeAttachedHTTPRoutesByListener(ctx context.Context, cl client.Client, 
 	}
 
 	routeList := &gatewayv1.HTTPRouteList{}
-	if err := cl.List(ctx, routeList); err != nil {
+	if err := cl.List(ctx, routeList, client.MatchingFields{IndexHTTPRouteParentGateway: gatewayIndexKey(gw)}); err != nil {
 		return nil, err
 	}
 

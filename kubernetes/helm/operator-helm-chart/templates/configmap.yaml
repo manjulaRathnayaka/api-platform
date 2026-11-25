@@ -18,6 +18,7 @@ data:
       helm_values_file_path: {{ .Values.gateway.helm.valuesFilePath | quote }}
       insecure_registry: {{ .Values.gateway.helm.insecureRegistry | default false }}
       plain_http: {{ .Values.gateway.helm.plainHTTP | default false }}
+      helm_max_history: {{ if hasKey .Values.gateway.helm "maxHistory" }}{{ .Values.gateway.helm.maxHistory | int }}{{ else }}3{{ end }}
 {{- with .Values.gateway.helm.registryCredentialsSecret }}
 {{- if .name }}
       registry_credentials_secret:
@@ -33,6 +34,14 @@ data:
       max_retry_attempts: {{ .Values.reconciliation.maxRetryAttempts | default 10 }}
       initial_backoff: {{ .Values.reconciliation.initialBackoff | default "1s" | quote }}
       max_backoff_duration: {{ .Values.reconciliation.maxBackoffDuration | default "60s" | quote }}
+      cache_sync_timeout: {{ .Values.reconciliation.cacheSyncTimeout | default "5m" | quote }}
+{{- with .Values.controllers.disabled }}
+    controllers:
+      disabled:
+{{- range . }}
+        - {{ . | quote }}
+{{- end }}
+{{- end }}
     logging:
       level: {{ .Values.logging.level | quote }}
       format: {{ .Values.logging.format | quote }}

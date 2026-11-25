@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,27 @@ type OperatorConfig struct {
 
 	// Logging configuration
 	Logging LoggingConfig `koanf:"logging"`
+
+	// Controllers selects which controllers run.
+	Controllers ControllersConfig `koanf:"controllers"`
+}
+
+// ControllersConfig selects which controllers the operator starts.
+type ControllersConfig struct {
+	// Disabled lists controller names that must not start, for example "RestApi" or
+	// "Subscription". A controller whose CRDs are not installed is skipped regardless.
+	// Sourced from the comma-separated GATEWAY_DISABLED_CONTROLLERS environment variable.
+	Disabled []string `koanf:"disabled"`
+}
+
+// ControllerEnabled reports whether the named controller is not listed in Disabled.
+func (c *OperatorConfig) ControllerEnabled(name string) bool {
+	for _, d := range c.Controllers.Disabled {
+		if strings.EqualFold(strings.TrimSpace(d), name) {
+			return false
+		}
+	}
+	return true
 }
 
 // GatewayAPIConfig holds settings for gateway.networking.k8s.io resources.
@@ -91,6 +113,11 @@ type GatewayConfig struct {
 
 	// RegistryCredentialsSecret holds the reference to the registry credentials secret
 	RegistryCredentialsSecret *SecretReference `koanf:"registry_credentials_secret"`
+
+	// HelmMaxHistory caps the revisions Helm keeps per gateway release. Each revision is a
+	// Secret holding the rendered manifest. 0 keeps every revision.
+	// Sourced from the GATEWAY_HELM_MAX_HISTORY environment variable.
+	HelmMaxHistory int `koanf:"helm_max_history"`
 }
 
 // SecretReference holds a reference to a Kubernetes Secret
@@ -124,6 +151,12 @@ type ReconciliationConfig struct {
 
 	// InitialBackoff is the initial backoff duration used when retrying
 	InitialBackoff time.Duration `koanf:"initial_backoff"`
+
+	// CacheSyncTimeout bounds how long each controller waits at startup for its watches to
+	// list their objects and for its watch handlers to process them. 0 uses
+	// controller-runtime's default.
+	// Sourced from the GATEWAY_CACHE_SYNC_TIMEOUT environment variable.
+	CacheSyncTimeout time.Duration `koanf:"cache_sync_timeout"`
 }
 
 // LoggingConfig holds logging configuration
@@ -146,6 +179,7 @@ func getDefaults() map[string]interface{} {
 			"helm_chart_name":       "api-platform-gateway",
 			"helm_chart_version":    "0.1.0",
 			"helm_values_file_path": "",
+			"helm_max_history":      3,
 		},
 		"gateway_api": map[string]interface{}{
 			"gateway_class_names": []string{"wso2-api-platform"},
@@ -157,6 +191,7 @@ func getDefaults() map[string]interface{} {
 			"max_retry_attempts":        10,
 			"max_backoff_duration":      "60s",
 			"initial_backoff":           "1s",
+			"cache_sync_timeout":        "5m",
 		},
 		"logging": map[string]interface{}{
 			"level":       "info",
@@ -249,6 +284,34 @@ func LoadConfig(configPath string) (*OperatorConfig, error) {
 		cfg.GatewayAPI.NodePortAddressOverride = v
 	}
 
+	// These keys contain underscores, which the generic GATEWAY_ mapping above turns into
+	// dots, so they are read explicitly.
+	if v := strings.TrimSpace(os.Getenv("GATEWAY_CACHE_SYNC_TIMEOUT")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GATEWAY_CACHE_SYNC_TIMEOUT %q: %w", v, err)
+		}
+		cfg.Reconciliation.CacheSyncTimeout = d
+	}
+
+	if v := strings.TrimSpace(os.Getenv("GATEWAY_HELM_MAX_HISTORY")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GATEWAY_HELM_MAX_HISTORY %q: %w", v, err)
+		}
+		cfg.Gateway.HelmMaxHistory = n
+	}
+
+	if v := strings.TrimSpace(os.Getenv("GATEWAY_DISABLED_CONTROLLERS")); v != "" {
+		var names []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				names = append(names, p)
+			}
+		}
+		cfg.Controllers.Disabled = names
+	}
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -307,6 +370,15 @@ func (c *OperatorConfig) Validate() error {
 
 	if c.Reconciliation.MaxBackoffDuration < c.Reconciliation.InitialBackoff {
 		return fmt.Errorf("max backoff duration must be greater than or equal to initial backoff")
+	}
+
+	// 0 leaves controller-runtime's own default (2m) in place.
+	if c.Reconciliation.CacheSyncTimeout < 0 {
+		return fmt.Errorf("cache sync timeout must not be negative")
+	}
+
+	if c.Gateway.HelmMaxHistory < 0 {
+		return fmt.Errorf("helm max history must be 0 (unlimited) or greater")
 	}
 
 	return nil

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"log/slog"
@@ -27,11 +28,18 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -135,10 +143,28 @@ func main() {
 		setupLog.Info("watching all namespaces (cluster-wide)")
 	}
 
+	// Helm stores every release revision as a Secret labelled owner=helm, holding the whole
+	// rendered manifest. The operator talks to Helm through Helm's own client and never reads
+	// these through the manager, so keep them out of the shared cache.
+	notHelmRelease, err := labels.NewRequirement("owner", selection.NotEquals, []string{"helm"})
+	if err != nil {
+		setupLog.Error(err, "unable to build Secret cache selector")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
 			DefaultNamespaces: defaultNamespaces,
+			// managedFields is never read by the operator and is often the largest part of
+			// a cached object.
+			DefaultTransform: cache.TransformStripManagedFields(),
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Label: labels.NewSelector().Add(*notHelmRelease)},
+			},
+		},
+		Controller: ctrlconfig.Controller{
+			CacheSyncTimeout: cfg.Reconciliation.CacheSyncTimeout,
 		},
 		Metrics: metricsserver.Options{
 			BindAddress:   metricsAddr,
@@ -166,73 +192,92 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = controller.NewGatewayReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		cfg,
-		appLog,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "APIGateway")
-		os.Exit(1)
+	// served reports whether every kind a controller watches is installed. A controller
+	// whose CRD is missing would otherwise wait for a cache that can never sync and stop the
+	// whole manager when CacheSyncTimeout expires.
+	mapper := mgr.GetRESTMapper()
+	served := func(objs ...client.Object) (bool, string) {
+		for _, obj := range objs {
+			gvk, err := apiutil.GVKForObject(obj, scheme)
+			if err != nil {
+				return false, err.Error()
+			}
+			if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+				if meta.IsNoMatchError(err) {
+					return false, gvk.String() + " is not installed"
+				}
+				setupLog.Error(err, "unable to check whether a kind is installed", "kind", gvk.String())
+				os.Exit(1)
+			}
+		}
+		return true, ""
 	}
-	if err = controller.NewRestApiReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		cfg,
-		appLog,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "RestApi")
-		os.Exit(1)
+
+	resourceTracker := controller.NewResourceTracker()
+	controllers := []struct {
+		name     string
+		requires []client.Object
+		setup    func(ctrl.Manager) error
+	}{
+		{"APIGateway", []client.Object{&apiv1.APIGateway{}},
+			controller.NewGatewayReconciler(mgr.GetClient(), mgr.GetScheme(), cfg, appLog).SetupWithManager},
+		{"RestApi", []client.Object{&apiv1.RestApi{}, &apiv1.APIGateway{}},
+			controller.NewRestApiReconciler(mgr.GetClient(), mgr.GetScheme(), cfg, appLog).SetupWithManager},
+		{"K8sGateway", []client.Object{&gatewayv1.Gateway{}, &gatewayv1.HTTPRoute{}, &gatewayv1beta1.ReferenceGrant{}},
+			controller.NewK8sGatewayReconciler(mgr.GetClient(), mgr.GetScheme(), cfg, appLog).SetupWithManager},
+		{"K8sGatewayClass", []client.Object{&gatewayv1.GatewayClass{}},
+			controller.NewK8sGatewayClassReconciler(mgr.GetClient(), mgr.GetScheme(), cfg, appLog).SetupWithManager},
+		{"HTTPRoute", []client.Object{&gatewayv1.HTTPRoute{}, &gatewayv1.Gateway{}, &gatewayv1beta1.ReferenceGrant{}, &apiv1.APIPolicy{}},
+			controller.NewHTTPRouteReconciler(mgr.GetClient(), mgr.GetScheme(), cfg, appLog).SetupWithManager},
+
+		// Management-API resource controllers (WSO2 APIGateway flow only).
+		// All share one in-memory ResourceTracker keyed by kind+namespace/name.
+		{"LlmProviderTemplate", []client.Object{&apiv1.LlmProviderTemplate{}, &apiv1.APIGateway{}},
+			controller.NewLlmProviderTemplateReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"LlmProvider", []client.Object{&apiv1.LlmProvider{}, &apiv1.LlmProviderTemplate{}, &apiv1.APIGateway{}},
+			controller.NewLlmProviderReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"LlmProxy", []client.Object{&apiv1.LlmProxy{}, &apiv1.LlmProvider{}, &apiv1.APIGateway{}},
+			controller.NewLlmProxyReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"Mcp", []client.Object{&apiv1.Mcp{}, &apiv1.APIGateway{}},
+			controller.NewMcpReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"Agent", []client.Object{&apiv1.Agent{}, &apiv1.APIGateway{}},
+			controller.NewAgentReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"ManagedSecret", []client.Object{&apiv1.ManagedSecret{}, &apiv1.APIGateway{}},
+			controller.NewManagedSecretReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"Certificate", []client.Object{&apiv1.Certificate{}, &apiv1.APIGateway{}},
+			controller.NewCertificateReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"ApiKey", []client.Object{&apiv1.ApiKey{}, &apiv1.APIGateway{}},
+			controller.NewApiKeyReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"SubscriptionPlan", []client.Object{&apiv1.SubscriptionPlan{}, &apiv1.APIGateway{}},
+			controller.NewSubscriptionPlanReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
+		{"Subscription", []client.Object{&apiv1.Subscription{}, &apiv1.APIGateway{}},
+			controller.NewSubscriptionReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
 	}
-	if err = controller.NewK8sGatewayReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		cfg,
-		appLog,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "K8sGateway")
-		os.Exit(1)
+
+	// Field indexes are registered only for installed kinds, for the same reason.
+	var indexes []controller.FieldIndex
+	for _, idx := range controller.FieldIndexes() {
+		if ok, _ := served(idx.Object); ok {
+			indexes = append(indexes, idx)
+		}
 	}
-	if err = controller.NewK8sGatewayClassReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		cfg,
-		appLog,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "K8sGatewayClass")
-		os.Exit(1)
-	}
-	if err = controller.NewHTTPRouteReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		cfg,
-		appLog,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "HTTPRoute")
+	if err := controller.RegisterFieldIndexes(context.Background(), mgr.GetFieldIndexer(), indexes); err != nil {
+		setupLog.Error(err, "unable to register field indexes")
 		os.Exit(1)
 	}
 
-	// Management-API resource controllers (WSO2 APIGateway flow only).
-	// All share one in-memory ResourceTracker keyed by kind+namespace/name.
-	resourceTracker := controller.NewResourceTracker()
-	managementControllers := []struct {
-		name  string
-		setup func(ctrl.Manager) error
-	}{
-		{"LlmProviderTemplate", controller.NewLlmProviderTemplateReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"LlmProvider", controller.NewLlmProviderReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"LlmProxy", controller.NewLlmProxyReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"Mcp", controller.NewMcpReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"Agent", controller.NewAgentReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"ManagedSecret", controller.NewManagedSecretReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"Certificate", controller.NewCertificateReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"ApiKey", controller.NewApiKeyReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"SubscriptionPlan", controller.NewSubscriptionPlanReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-		{"Subscription", controller.NewSubscriptionReconciler(mgr.GetClient(), cfg, appLog, resourceTracker).SetupWithManager},
-	}
-	for _, mc := range managementControllers {
-		if err := mc.setup(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", mc.name)
+	for _, c := range controllers {
+		if !cfg.ControllerEnabled(c.name) {
+			setupLog.Info("controller disabled by configuration", "controller", c.name)
+			continue
+		}
+		if ok, reason := served(c.requires...); !ok {
+			setupLog.Info("WARNING: controller not started because a kind it watches is not installed; restart the operator after installing it",
+				"controller", c.name, "reason", reason)
+			continue
+		}
+		if err := c.setup(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", c.name)
 			os.Exit(1)
 		}
 	}

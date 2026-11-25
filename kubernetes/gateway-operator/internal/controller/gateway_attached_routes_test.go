@@ -24,7 +24,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -239,7 +238,7 @@ func TestComputeAttachedHTTPRoutesByListener(t *testing.T) {
 			_ = corev1.AddToScheme(scheme)
 			_ = gatewayv1.Install(scheme)
 
-			builder := fake.NewClientBuilder().WithScheme(scheme)
+			builder := newIndexedFakeClientBuilder(scheme)
 			for i := range tt.namespaces {
 				builder = builder.WithObjects(&tt.namespaces[i])
 			}

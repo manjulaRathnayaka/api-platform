@@ -112,7 +112,7 @@ func TestEnqueueHTTPRouteForAPIPolicy(t *testing.T) {
 				Policies: []apiv1.Policy{{Name: "p", Version: "v1"}},
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(route, ap).Build()
+		cl := newIndexedFakeClientBuilder(scheme).WithObjects(route, ap).Build()
 		rec := &HTTPRouteReconciler{Client: cl}
 		reqs := rec.enqueueHTTPRouteForAPIPolicy(ctx, ap)
 		require.Len(t, reqs, 1)
@@ -218,7 +218,7 @@ func TestEnqueueHTTPRoutesForSecret(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "demo", Name: "my-secret"},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ap, secret).Build()
+	cl := newIndexedFakeClientBuilder(scheme).WithObjects(ap, secret).Build()
 	r := &HTTPRouteReconciler{Client: cl}
 	reqs := r.enqueueHTTPRoutesForSecret(context.Background(), secret)
 	require.Len(t, reqs, 1)
@@ -262,7 +262,7 @@ func TestEnqueueHTTPRoutesForSecret_ExtensionRefOnlyAPIPolicy(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "demo", Name: "my-secret"},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ap, secret, route).Build()
+	cl := newIndexedFakeClientBuilder(scheme).WithObjects(ap, secret, route).Build()
 	r := &HTTPRouteReconciler{Client: cl}
 	reqs := r.enqueueHTTPRoutesForSecret(context.Background(), secret)
 	require.Len(t, reqs, 1)
@@ -297,7 +297,7 @@ func TestEnqueueHTTPRoutesForConfigMap(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "demo", Name: "my-cm"},
 		Data:       map[string]string{"region": "us-east-1"},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ap, cm).Build()
+	cl := newIndexedFakeClientBuilder(scheme).WithObjects(ap, cm).Build()
 	r := &HTTPRouteReconciler{Client: cl}
 	reqs := r.enqueueHTTPRoutesForConfigMap(context.Background(), cm)
 	require.Len(t, reqs, 1)
