@@ -70,6 +70,15 @@ reconciliation:
   initial_backoff: "1s"
   max_backoff_duration: "60s"
 
+  # How long each controller waits at startup for its caches and watch handlers to sync.
+  # Override with GATEWAY_CACHE_SYNC_TIMEOUT.
+  cache_sync_timeout: "5m"
+
+# Controllers to keep off, e.g. ["RestApi", "Subscription"].
+# Override with GATEWAY_DISABLED_CONTROLLERS (comma-separated).
+# controllers:
+#   disabled: []
+
 # Logging configuration
 logging:
   # Log level (debug, info, warn, error)

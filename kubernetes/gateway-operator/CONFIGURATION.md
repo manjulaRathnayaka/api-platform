@@ -82,6 +82,21 @@ When a **per-gateway** overlay is supplied (Kubernetes `Gateway` annotation `hel
 | `reconciliation.enabled` | bool | `true` | Enable automatic reconciliation |
 | `reconciliation.interval` | int | `300` | Reconciliation interval in seconds |
 
+### Scale Settings
+
+These settings matter on clusters with many namespaces, Services and HTTPRoutes.
+
+| Field | Env var | Default | Description |
+|-------|---------|---------|-------------|
+| `reconciliation.cache_sync_timeout` | `GATEWAY_CACHE_SYNC_TIMEOUT` | `5m` | How long each controller waits at startup for its watches to list their objects and for its watch handlers to process them. On timeout the operator exits. `0` uses controller-runtime's default (2m). |
+| `gateway.helm_max_history` | `GATEWAY_HELM_MAX_HISTORY` | `3` | Helm revisions kept per gateway release. Each revision is a Secret holding the rendered manifest. `0` keeps every revision. |
+| `controllers.disabled` | `GATEWAY_DISABLED_CONTROLLERS` (comma-separated) | `[]` | Controllers that must not start: `APIGateway`, `RestApi`, `K8sGateway`, `K8sGatewayClass`, `HTTPRoute`, `LlmProviderTemplate`, `LlmProvider`, `LlmProxy`, `Mcp`, `Agent`, `ManagedSecret`, `Certificate`, `ApiKey`, `SubscriptionPlan`, `Subscription`. |
+
+A controller whose CRDs are not installed is skipped at startup with a warning, instead of
+stopping the operator when its cache cannot sync. Restart the operator after installing the CRD.
+
+The operator also keeps Helm release Secrets (`owner=helm`) and `managedFields` out of its cache.
+
 ### Logging Configuration
 
 | Field | Type | Default | Description |

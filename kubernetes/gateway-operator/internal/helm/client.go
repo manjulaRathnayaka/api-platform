@@ -124,6 +124,10 @@ type InstallOrUpgradeOptions struct {
 
 	// PlainHTTP forces plain HTTP instead of HTTPS for OCI registries
 	PlainHTTP bool
+
+	// MaxHistory caps the revisions kept for the release on upgrade. Each revision is a
+	// Secret holding the rendered manifest. 0 keeps every revision.
+	MaxHistory int
 }
 
 // UninstallOptions contains options for uninstalling a Helm release
@@ -250,6 +254,7 @@ func (c *Client) upgrade(ctx context.Context, actionConfig *action.Configuration
 	client.Namespace = opts.Namespace
 	client.Wait = opts.Wait
 	client.Version = opts.Version
+	client.MaxHistory = opts.MaxHistory
 
 	if opts.Timeout > 0 {
 		client.Timeout = time.Duration(opts.Timeout) * time.Second
